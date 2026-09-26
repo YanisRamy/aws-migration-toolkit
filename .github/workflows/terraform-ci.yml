@@ -14,7 +14,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        module: [lambda]
+        module: [lambda, network, dynamodb, s3, ec2, ecs, eks]
     steps:
       - uses: actions/checkout@v4
 
