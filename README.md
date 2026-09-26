@@ -1,39 +1,122 @@
 # AWS Migration Toolkit
 
-Portfolio project simulating a real cloud migration workflow: EC2 → ECS → EKS, with serverless and IaC best practices — built to cover the technical stack flagged as priority for an upcoming Cloud Migration & Transformation apprenticeship.
+Quand on m'a annoncé, avant même mon arrivée en alternance, que l'équipe allait se concentrer sur des migrations AWS (EC2, ECS, EKS, Lambda, DynamoDB, S3) avec Kubernetes et GitHub Actions comme unique CI/CD, j'ai voulu arriver prêt plutôt que de découvrir ces outils sur le tas. Ce projet reconstitue un scénario de migration cloud complet, du legacy jusqu'à la cible, en couvrant précisément cette stack.
 
-## Architecture
+## Le scénario
 
-- **Compute progression**: EC2 (legacy baseline) → ECS Fargate (containerized) → EKS (target platform)
-- **Kubernetes**: Deployment, Service, Ingress, ConfigMap, Secret, HorizontalPodAutoscaler — all tested locally with `kind`
-- **Serverless**: Lambda triggered by S3 events, writing to DynamoDB
-- **Storage & data**: S3 (uploads + Terraform state backend), DynamoDB (app data + Terraform lock)
-- **IaC**: Terraform, modular (network / ec2 / ecs / eks / lambda / dynamodb / s3)
-- **CI/CD**: GitHub Actions — Terraform validation across all modules
+Une application part d'une instance EC2 classique (le legacy), passe par ECS Fargate comme étape intermédiaire de conteneurisation, puis atterrit sur EKS, la cible finale. En parallèle, une fonction Lambda gère un traitement événementiel déclenché par un upload S3, avec DynamoDB comme base de données.
 
-## Repository structure
+```mermaid
+flowchart LR
+    subgraph Migration["Progression de la migration"]
+        EC2["EC2\n(legacy)"] --> ECS["ECS Fargate\n(conteneurisé)"] --> EKS["EKS\n(cible)"]
+    end
 
-\`\`\`
+    subgraph Serverless["Traitement événementiel"]
+        S3["S3\n(upload)"] -->|trigger| Lambda["Lambda"] --> DynamoDB["DynamoDB"]
+    end
+
+    subgraph K8s["Dans EKS"]
+        Ingress --> Service --> Deployment
+        Deployment --> ConfigMap
+        Deployment --> Secret
+        HPA -.->|scale| Deployment
+    end
+
+    EKS --> K8s
+
+    subgraph CICD["CI/CD"]
+        GHA["GitHub Actions"] -->|terraform apply| Migration
+        GHA -->|kubectl apply| K8s
+    end
+```
+
+## Pourquoi cette progression EC2 → ECS → EKS plutôt qu'un déploiement direct sur EKS
+
+C'est le cœur de la mission décrite dans la fiche de poste : accompagner des migrations, pas juste déployer sur du Kubernetes flambant neuf. Une vraie migration cloud passe rarement d'un legacy directement vers la cible — elle transite par des étapes intermédiaires qui réduisent le risque à chaque saut. Reproduire cette progression montre que je comprends le *process* de migration, pas seulement la techno finale.
+
+## Kubernetes : les six objets qui comptent
+
+L'équipe a listé six objets Kubernetes comme prioritaires. Voici comment chacun est utilisé concrètement dans `k8s/base/` :
+
+**Deployment** — gère les replicas et les rolling updates de l'application :
+```yaml
+spec:
+  replicas: 2
+  template:
+    spec:
+      containers:
+      - name: demo-app
+        image: nginxdemos/hello:latest
+```
+
+**ConfigMap** et **Secret** — séparent la configuration non sensible (variables d'environnement) des données sensibles (clés API), montés tous les deux dans le même pod via `envFrom` et `env.valueFrom` :
+```yaml
+envFrom:
+- configMapRef:
+    name: demo-app-config
+env:
+- name: API_KEY
+  valueFrom:
+    secretKeyRef:
+      name: demo-app-secret
+      key: api-key
+```
+
+**Service** puis **Ingress** — le Service expose les pods en interne au cluster (`ClusterIP`), l'Ingress route le trafic externe vers ce Service via un nom de domaine :
+```yaml
+spec:
+  ingressClassName: nginx
+  rules:
+  - host: demo-app.local
+    http:
+      paths:
+      - path: /
+        backend:
+          service:
+            name: demo-app-svc
+```
+
+**HorizontalPodAutoscaler** — surveille l'utilisation CPU des pods et ajuste automatiquement le nombre de replicas entre 2 et 6 quand la charge dépasse 50% :
+```yaml
+spec:
+  minReplicas: 2
+  maxReplicas: 6
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        averageUtilization: 50
+```
+
+Les six ont été testés en conditions réelles sur un cluster local (`kind`), avec un vrai contrôleur Ingress nginx et le metrics-server pour que le HPA lise des métriques CPU réelles plutôt que simulées.
+
+## Infrastructure as Code
+
+Chaque service AWS est un module Terraform indépendant (`terraform/modules/`), assemblé ensuite dans `terraform/environments/dev`. Le state est géré à distance sur S3 avec verrouillage via DynamoDB (`terraform/bootstrap`), ce qui évite qu'un `terraform apply` concurrent corrompe l'infrastructure — une pratique standard en équipe, même si ce projet reste solo.
+
+## CI/CD
+
+GitHub Actions valide automatiquement les sept modules Terraform à chaque push (`fmt`, `init`, `validate`), pour attraper les erreurs de syntaxe ou de formatage avant même de tenter un déploiement :
+
+```yaml
+strategy:
+  matrix:
+    module: [lambda, network, dynamodb, s3, ec2, ecs, eks]
+```
+
+## Structure du repo
 terraform/
-  bootstrap/       # S3 + DynamoDB state backend
-  modules/         # one module per AWS service
-  environments/    # environment-specific composition
+bootstrap/ state backend (S3 + DynamoDB lock)
+modules/ un module par service AWS
+environments/ assemblage des modules pour un environnement donné
 k8s/
-  base/            # Deployment, Service, Ingress, ConfigMap, Secret, HPA
+base/ les six manifests Kubernetes
 lambda/
-  src/             # function code
-  tests/           # pytest unit tests
-.github/workflows/ # CI pipelines
-\`\`\`
+src/ code de la fonction
+tests/ tests unitaires (pytest)
+.github/workflows/ pipelines CI
+## Où en est le projet
 
-## Status
-
-- [x] Terraform modules for EC2, ECS, EKS, Lambda, DynamoDB, S3, network
-- [x] Kubernetes manifests validated locally (kind)
-- [x] Lambda function with unit tests
-- [x] CI pipeline validating all Terraform modules
-- [ ] Live deployment to AWS (pending account verification)
-
-## Why this project
-
-Built to demonstrate hands-on readiness on the exact stack requested ahead of a Cloud Migration & Transformation apprenticeship: AWS (EC2/ECS/EKS/Lambda/DynamoDB/S3), core Kubernetes objects, Terraform, and GitHub Actions as the sole CI/CD tool.
+L'infrastructure et le code sont écrits, testés et validés par CI. Le déploiement réel sur AWS est en attente de vérification de compte (délai administratif classique pour un compte fraîchement créé) — Terraform et Kubernetes sont prêts à être appliqués dès que l'accès est rétabli.
