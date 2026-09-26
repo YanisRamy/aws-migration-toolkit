@@ -1,45 +1,71 @@
 # AWS Migration Toolkit
 
-Quand on m'a annoncé, avant même mon arrivée en alternance, que l'équipe allait se concentrer sur des migrations AWS (EC2, ECS, EKS, Lambda, DynamoDB, S3) avec Kubernetes et GitHub Actions comme unique CI/CD, j'ai voulu arriver prêt plutôt que de découvrir ces outils sur le tas. Ce projet reconstitue un scénario de migration cloud complet, du legacy jusqu'à la cible, en couvrant précisément cette stack.
+When I was told, before even starting my apprenticeship, that the team would be focusing on AWS migrations (EC2, ECS, EKS, Lambda, DynamoDB, S3) with Kubernetes and GitHub Actions as the sole CI/CD tool, I wanted to show up ready rather than learn these tools on the job. This project recreates a full cloud migration scenario, from legacy to target platform, covering exactly this stack.
 
-## Le scénario
+## The scenario
 
-Une application part d'une instance EC2 classique (le legacy), passe par ECS Fargate comme étape intermédiaire de conteneurisation, puis atterrit sur EKS, la cible finale. En parallèle, une fonction Lambda gère un traitement événementiel déclenché par un upload S3, avec DynamoDB comme base de données.
+An application starts on a classic EC2 instance (the legacy baseline), moves through ECS Fargate as an intermediate containerization step, then lands on EKS, the final target. In parallel, a Lambda function handles event-driven processing triggered by an S3 upload, with DynamoDB as the data store.
 
 ```mermaid
-flowchart LR
-    subgraph Migration["Progression de la migration"]
-        EC2["EC2\n(legacy)"] --> ECS["ECS Fargate\n(conteneurisé)"] --> EKS["EKS\n(cible)"]
+flowchart TB
+    classDef legacy fill:#8B8B8B,stroke:#333,color:#fff
+    classDef migration fill:#FF9900,stroke:#333,color:#fff
+    classDef target fill:#326CE5,stroke:#333,color:#fff
+    classDef serverless fill:#7C3AED,stroke:#333,color:#fff
+    classDef cicd fill:#2EA043,stroke:#333,color:#fff
+
+    subgraph Progression["Migration progression"]
+        direction LR
+        EC2["EC2 instance\nlegacy baseline"]:::legacy
+        ECS["ECS Fargate\ncontainerized"]:::migration
+        EKS["EKS cluster\nfinal target"]:::target
+        EC2 --> ECS --> EKS
     end
 
-    subgraph Serverless["Traitement événementiel"]
-        S3["S3\n(upload)"] -->|trigger| Lambda["Lambda"] --> DynamoDB["DynamoDB"]
-    end
+    subgraph Cluster["Inside the EKS cluster"]
+        direction TB
+        Ingress["Ingress\nexternal routing"]:::target
+        Service["Service\nClusterIP"]:::target
+        Deployment["Deployment\n2 to 6 replicas"]:::target
+        ConfigMap["ConfigMap"]:::target
+        Secret["Secret"]:::target
+        HPA["HorizontalPodAutoscaler\n50% CPU target"]:::target
 
-    subgraph K8s["Dans EKS"]
         Ingress --> Service --> Deployment
-        Deployment --> ConfigMap
-        Deployment --> Secret
-        HPA -.->|scale| Deployment
+        ConfigMap -.-> Deployment
+        Secret -.-> Deployment
+        HPA -.->|scales| Deployment
     end
 
-    EKS --> K8s
-
-    subgraph CICD["CI/CD"]
-        GHA["GitHub Actions"] -->|terraform apply| Migration
-        GHA -->|kubectl apply| K8s
+    subgraph Events["Event-driven processing"]
+        direction LR
+        S3["S3 bucket\nuploads"]:::serverless
+        Lambda["Lambda"]:::serverless
+        DDB["DynamoDB"]:::serverless
+        S3 -->|trigger| Lambda --> DDB
     end
+
+    subgraph Pipeline["CI/CD"]
+        direction LR
+        GHA["GitHub Actions"]:::cicd
+    end
+
+    EKS --> Cluster
+    GHA -->|terraform apply| Progression
+    GHA -->|kubectl apply| Cluster
+    GHA -->|terraform apply| Events
 ```
 
-## Pourquoi cette progression EC2 → ECS → EKS plutôt qu'un déploiement direct sur EKS
+## Why EC2 to ECS to EKS instead of deploying straight to EKS
 
-C'est le cœur de la mission décrite dans la fiche de poste : accompagner des migrations, pas juste déployer sur du Kubernetes flambant neuf. Une vraie migration cloud passe rarement d'un legacy directement vers la cible — elle transite par des étapes intermédiaires qui réduisent le risque à chaque saut. Reproduire cette progression montre que je comprends le *process* de migration, pas seulement la techno finale.
+This is the core of the mission described in the job posting: supporting migrations, not just deploying onto a fresh Kubernetes cluster. A real cloud migration rarely jumps straight from legacy to the final target. It moves through intermediate steps that reduce risk at each stage. Reproducing that progression shows an understanding of the migration process itself, not just the final technology.
 
-## Kubernetes : les six objets qui comptent
+## Kubernetes, the six objects that matter
 
-L'équipe a listé six objets Kubernetes comme prioritaires. Voici comment chacun est utilisé concrètement dans `k8s/base/` :
+The team flagged six Kubernetes objects as priorities. Here is how each one is actually used in `k8s/base/`.
 
-**Deployment** — gère les replicas et les rolling updates de l'application :
+The Deployment manages replicas and rolling updates for the application.
+
 ```yaml
 spec:
   replicas: 2
@@ -50,7 +76,8 @@ spec:
         image: nginxdemos/hello:latest
 ```
 
-**ConfigMap** et **Secret** — séparent la configuration non sensible (variables d'environnement) des données sensibles (clés API), montés tous les deux dans le même pod via `envFrom` et `env.valueFrom` :
+The ConfigMap and Secret separate non sensitive configuration (environment variables) from sensitive data (API keys), both mounted into the same pod through envFrom and env.valueFrom.
+
 ```yaml
 envFrom:
 - configMapRef:
@@ -63,7 +90,8 @@ env:
       key: api-key
 ```
 
-**Service** puis **Ingress** — le Service expose les pods en interne au cluster (`ClusterIP`), l'Ingress route le trafic externe vers ce Service via un nom de domaine :
+The Service exposes the pods internally to the cluster as ClusterIP, and the Ingress routes external traffic to that Service through a hostname.
+
 ```yaml
 spec:
   ingressClassName: nginx
@@ -77,7 +105,8 @@ spec:
             name: demo-app-svc
 ```
 
-**HorizontalPodAutoscaler** — surveille l'utilisation CPU des pods et ajuste automatiquement le nombre de replicas entre 2 et 6 quand la charge dépasse 50% :
+The HorizontalPodAutoscaler watches CPU usage on the pods and automatically adjusts the replica count between 2 and 6 once load crosses 50%.
+
 ```yaml
 spec:
   minReplicas: 2
@@ -90,15 +119,15 @@ spec:
         averageUtilization: 50
 ```
 
-Les six ont été testés en conditions réelles sur un cluster local (`kind`), avec un vrai contrôleur Ingress nginx et le metrics-server pour que le HPA lise des métriques CPU réelles plutôt que simulées.
+All six were tested under real conditions on a local cluster with kind, using an actual nginx Ingress controller and metrics-server so the HPA reads real CPU metrics rather than simulated ones.
 
 ## Infrastructure as Code
 
-Chaque service AWS est un module Terraform indépendant (`terraform/modules/`), assemblé ensuite dans `terraform/environments/dev`. Le state est géré à distance sur S3 avec verrouillage via DynamoDB (`terraform/bootstrap`), ce qui évite qu'un `terraform apply` concurrent corrompe l'infrastructure — une pratique standard en équipe, même si ce projet reste solo.
+Each AWS service is an independent Terraform module under `terraform/modules/`, assembled afterward in `terraform/environments/dev`. State is stored remotely on S3 with locking through DynamoDB in `terraform/bootstrap`. This prevents a concurrent terraform apply from corrupting the infrastructure, a standard practice on a team even though this project is solo.
 
 ## CI/CD
 
-GitHub Actions valide automatiquement les sept modules Terraform à chaque push (`fmt`, `init`, `validate`), pour attraper les erreurs de syntaxe ou de formatage avant même de tenter un déploiement :
+GitHub Actions automatically validates all seven Terraform modules on every push (fmt, init, validate), catching syntax or formatting errors before any deployment is even attempted.
 
 ```yaml
 strategy:
@@ -106,17 +135,18 @@ strategy:
     module: [lambda, network, dynamodb, s3, ec2, ecs, eks]
 ```
 
-## Structure du repo
+## Repository structure
 terraform/
-bootstrap/ state backend (S3 + DynamoDB lock)
-modules/ un module par service AWS
-environments/ assemblage des modules pour un environnement donné
+bootstrap/ state backend, S3 and DynamoDB lock
+modules/ one module per AWS service
+environments/ module composition for a given environment
 k8s/
-base/ les six manifests Kubernetes
+base/ the six Kubernetes manifests
 lambda/
-src/ code de la fonction
-tests/ tests unitaires (pytest)
-.github/workflows/ pipelines CI
-## Où en est le projet
+src/ function code
+tests/ unit tests with pytest
+.github/workflows/ CI pipelines
 
-L'infrastructure et le code sont écrits, testés et validés par CI. Le déploiement réel sur AWS est en attente de vérification de compte (délai administratif classique pour un compte fraîchement créé) — Terraform et Kubernetes sont prêts à être appliqués dès que l'accès est rétabli.
+## Current status
+
+The infrastructure and code are written, tested, and validated by CI. Actual deployment to AWS is pending account verification, a routine administrative delay for a newly created account. Terraform and Kubernetes are ready to be applied as soon as access is restored.
